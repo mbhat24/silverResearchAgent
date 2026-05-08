@@ -31,10 +31,13 @@ class SilverDataService:
         """Fetch live silver prices from multiple sources."""
         prices = []
 
-        # Check cache
-        if (self._cached_prices and self._cache_time and
-            (time.time() - self._cache_time) < self._cache_duration):
-            return self._cached_prices
+        # Check cache first (even if expired, return cached data on error)
+        if self._cached_prices:
+            cache_age = time.time() - self._cache_time if self._cache_time else 999999
+            if cache_age < self._cache_duration:
+                return self._cached_prices
+            # Cache expired but keep as fallback
+            fallback_prices = self._cached_prices
 
         # Fetch XAG/USD from Yahoo Finance
         try:
@@ -60,19 +63,11 @@ class SilverDataService:
                 ))
         except Exception as e:
             print(f"Error fetching XAG/USD: {e}")
-            # Fallback to mock data if rate limited
-            prices.append(SilverPrice(
-                symbol="XAG/USD",
-                price=32.50,
-                currency="USD",
-                unit="troy_oz",
-                change_24h=0.25,
-                change_pct_24h=0.77,
-                high_24h=32.80,
-                low_24h=32.10,
-                timestamp=datetime.now(),
-                source="Cached (Rate limited)"
-            ))
+            # Use cached data as fallback
+            if fallback_prices:
+                return fallback_prices
+            # Last resort: return empty list
+            return []
 
         # Fetch Silver Futures (SI=F)
         try:
@@ -237,20 +232,8 @@ class SilverDataService:
             }
         except Exception as e:
             print(f"Error fetching technical indicators: {e}")
-            # Fallback data when rate limited
-            return {
-                "current_price": 32.50,
-                "sma_20": 32.30,
-                "sma_50": 32.10,
-                "sma_200": 31.80,
-                "rsi_14": 55.0,
-                "macd": 0.15,
-                "macd_signal": 0.12,
-                "support": 31.50,
-                "resistance": 33.00,
-                "trend": "neutral",
-                "volatility_30d": 2.5
-            }
+            # Return error instead of fake data
+            return {"error": "Rate limited by Yahoo Finance. Please try again later."}
 
     async def get_supply_demand(self) -> SupplyDemand:
         """Get silver supply-demand fundamentals (from Silver Institute estimates)."""
