@@ -28,17 +28,15 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Serve static frontend files (SPA) - MUST come before router
+    # Serve static frontend files (SPA)
     frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
     if frontend_dist.exists():
-        # Mount at root so asset paths work correctly
-        app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="static")
+        # Mount static files at /static/
+        app.mount("/static", StaticFiles(directory=str(frontend_dist), html=True), name="static")
 
-        @app.get("/{full_path:path}", include_in_schema=False)
-        async def serve_spa(full_path: str):
-            # Don't catch API routes - let them fall through to the router
-            if full_path.startswith("api/"):
-                return None
+        # Serve index.html at root
+        @app.get("/", include_in_schema=False)
+        async def serve_index():
             index_path = frontend_dist / "index.html"
             if index_path.exists():
                 return FileResponse(index_path)
