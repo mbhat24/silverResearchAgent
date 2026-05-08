@@ -1,4 +1,6 @@
-from pydantic_settings import BaseSettings
+import os
+from pathlib import Path
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
 
@@ -9,7 +11,7 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite+aiosqlite:///./silver_data.db"
 
-    # API Keys (set in .env)
+    # API Keys (set in .env or environment variables)
     openai_api_key: str = ""
     newsapi_key: str = ""
 
@@ -21,9 +23,11 @@ class Settings(BaseSettings):
     research_model: str = "gpt-4o"
     max_research_depth: int = 5
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_ignore_empty=True
+    )
 
 
 @lru_cache()
