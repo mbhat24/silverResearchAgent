@@ -30,11 +30,19 @@ def create_app() -> FastAPI:
 
     app.include_router(router)
 
-    # Serve static frontend files (SPA) - router must come first
+    # Serve static frontend files (SPA)
     frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
     if frontend_dist.exists():
-        # Mount static files at root (router takes priority for /api/*)
-        app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="static")
+        # Mount static assets at /static/
+        app.mount("/static", StaticFiles(directory=str(frontend_dist), html=False), name="static")
+
+        # Serve index.html at root
+        @app.get("/", include_in_schema=False)
+        async def serve_index():
+            index_path = frontend_dist / "index.html"
+            if index_path.exists():
+                return FileResponse(index_path)
+            return {"message": "Frontend not built. Run 'cd frontend && npm run build'"}
 
     return app
 
