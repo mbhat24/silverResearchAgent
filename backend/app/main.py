@@ -31,16 +31,9 @@ def create_app() -> FastAPI:
     # Serve static frontend files (SPA) - MUST come before router
     frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
     if frontend_dist.exists():
-        app.mount("/static", StaticFiles(directory=str(frontend_dist), html=True), name="static")
+        # Mount at root so asset paths work correctly
+        app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="static")
 
-        @app.get("/", include_in_schema=False)
-        async def serve_index():
-            index_path = frontend_dist / "index.html"
-            if index_path.exists():
-                return FileResponse(index_path)
-            return {"message": "Frontend not built. Run 'cd frontend && npm run build'"}
-
-        # Catch-all for SPA routing (only for non-API routes)
         @app.get("/{full_path:path}", include_in_schema=False)
         async def serve_spa(full_path: str):
             # Don't catch API routes - let them fall through to the router
