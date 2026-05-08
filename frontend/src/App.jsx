@@ -9,7 +9,7 @@ import NewsFeed from "./components/NewsFeed";
 import SupplyDemandPanel from "./components/SupplyDemandPanel";
 import { BarChart3, Newspaper, Brain, TrendingUp, Factory } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "https://silver-research-agent-api.onrender.com/api";
+const API_BASE = "/api";
 
 export default function App() {
   const [dashboard, setDashboard] = useState(null);

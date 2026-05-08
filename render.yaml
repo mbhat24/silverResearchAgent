@@ -1,9 +1,9 @@
 services:
   - type: web
-    name: silver-research-agent-api
+    name: silver-research-agent
     env: python
     plan: free
-    buildCommand: pip install -r backend/requirements.txt
+    buildCommand: cd frontend && npm install && npm run build && cd .. && pip install -r backend/requirements.txt
     startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
@@ -11,13 +11,3 @@ services:
       - key: OPENAI_API_KEY
         sync: false
     healthCheckPath: /api/health
-
-  - type: web
-    name: silver-research-agent-frontend
-    env: static
-    plan: free
-    buildCommand: cd frontend && npm install && npm run build
-    publishPath: frontend/dist
-    envVars:
-      - key: VITE_API_URL
-        value: https://silver-research-agent-api.onrender.com/api
