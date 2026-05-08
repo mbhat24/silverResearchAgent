@@ -11,3 +11,10 @@ services:
       - key: OPENAI_API_KEY
         sync: false
     healthCheckPath: /api/health
+
+  - type: web
+    name: silver-research-agent-frontend
+    env: static
+    plan: free
+    buildCommand: cd frontend && npm install && npm run build
+    publishPath: frontend/dist
