@@ -14,15 +14,23 @@ from ..config import get_settings
 
 settings = get_settings()
 
+YF_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://finance.yahoo.com",
+    "Referer": "https://finance.yahoo.com",
+}
 
-def _yf_fetch(symbol: str, period: str = "2d", interval: str = "1d") -> dict:
-    """Fetch data from Yahoo Finance using curl_cffi to bypass rate limits."""
-    from curl_cffi import requests as curl_requests
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={period}"
-    resp = curl_requests.get(url, impersonate="chrome110")
-    resp.raise_for_status()
-    result = resp.json()
-    return result["chart"]["result"][0]
+
+async def _yf_fetch(symbol: str, period: str = "2d", interval: str = "1d") -> dict:
+    """Fetch data from Yahoo Finance API directly."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={period}&includePrePost=false"
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        resp = await client.get(url, headers=YF_HEADERS)
+        resp.raise_for_status()
+        result = resp.json()
+        return result["chart"]["result"][0]
 
 
 class SilverDataService:
@@ -65,7 +73,7 @@ class SilverDataService:
         usd_inr = await self._get_usd_inr_rate()
 
         try:
-            chart = _yf_fetch("XAGUSD=X", "2d")
+            chart = await _yf_fetch("XAGUSD=X", "2d")
             quote = chart["indicators"]["quote"][0]
             closes = [x for x in quote["close"] if x is not None]
             highs = [x for x in quote["high"] if x is not None]
@@ -154,7 +162,7 @@ class SilverDataService:
         try:
             period_map = {"1w": "5d", "1mo": "1mo", "3mo": "3mo", "6mo": "6mo", "1y": "1y", "2y": "2y", "5y": "5y"}
             yf_period = period_map.get(period, "1y")
-            chart = _yf_fetch(symbol, yf_period)
+            chart = await _yf_fetch(symbol, yf_period)
             timestamps = chart["timestamp"]
             quote = chart["indicators"]["quote"][0]
 
