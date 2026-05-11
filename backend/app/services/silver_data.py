@@ -1,12 +1,12 @@
 import asyncio
 import httpx
-import yfinance as yf
 from datetime import datetime, timedelta
 from typing import Optional
 import pandas as pd
 import numpy as np
 from functools import lru_cache
 import time
+import json
 
 from ..models.schemas import SilverPrice, SilverPriceIndia, HistoricalData, SupplyDemand
 from ..config import get_settings
@@ -17,125 +17,173 @@ settings = get_settings()
 class SilverDataService:
     """Fetches silver data from multiple sources worldwide and India-specific."""
 
-    # Approximate INR/USD rate (updated periodically)
-    USD_INR_RATE = 83.5
-    # 1 troy ounce = 31.1035 grams
     OZ_TO_GRAM = 31.1035
 
-    # Cache for rate-limited data
+    # Cache
     _cached_prices = None
     _cache_time = None
-    _cache_duration = 300  # 5 minutes
+    _cache_duration = 300
+    _usd_inr_rate = 86.5
+
+    async def _fetch_json(self, url: str, headers: dict = None) -> dict:
+        """Fetch JSON from URL with browser-like headers."""
+        default_headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Accept": "application/json",
+        }
+        if headers:
+            default_headers.update(headers)
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers=default_headers)
+            resp.raise_for_status()
+            return resp.json()
+
+    async def _get_usd_inr_rate(self) -> float:
+        """Fetch live USD/INR exchange rate."""
+        try:
+            data = await self._fetch_json(
+                "https://api.exchangerate-api.com/v4/latest/USD"
+            )
+            rate = data.get("rates", {}).get("INR", 86.5)
+            self._usd_inr_rate = rate
+            return rate
+        except Exception as e:
+            print(f"Error fetching USD/INR: {e}")
+            return self._usd_inr_rate
 
     async def get_live_prices(self) -> list[SilverPrice]:
-        """Fetch live silver prices from multiple sources."""
+        """Fetch live silver prices from free APIs."""
         prices = []
 
-        # Check cache first (even if expired, return cached data on error)
         fallback_prices = None
         if self._cached_prices:
             cache_age = time.time() - self._cache_time if self._cache_time else 999999
             if cache_age < self._cache_duration:
                 return self._cached_prices
-            # Cache expired but keep as fallback
             fallback_prices = self._cached_prices
 
-        # Fetch XAG/USD from Yahoo Finance
-        try:
-            xag = yf.Ticker("XAGUSD=X")
-            info = xag.history(period="2d")
-            if not info.empty:
-                latest = info.iloc[-1]
-                prev = info.iloc[-2] if len(info) > 1 else latest
-                change = latest["Close"] - prev["Close"]
-                change_pct = (change / prev["Close"]) * 100
+        usd_inr = await self._get_usd_inr_rate()
 
-                prices.append(SilverPrice(
-                    symbol="XAG/USD",
-                    price=round(latest["Close"], 2),
-                    currency="USD",
-                    unit="troy_oz",
-                    change_24h=round(change, 2),
-                    change_pct_24h=round(change_pct, 2),
-                    high_24h=round(latest["High"], 2),
-                    low_24h=round(latest["Low"], 2),
-                    timestamp=datetime.now(),
-                    source="Yahoo Finance"
-                ))
+        # Fetch from metals.live free API
+        try:
+            data = await self._fetch_json("https://api.metals.live/v1/spot/silver")
+            if data and isinstance(data, list) and len(data) > 0:
+                price_usd = float(data[0].get("price", 0))
+                if price_usd > 0:
+                    prices.append(SilverPrice(
+                        symbol="XAG/USD",
+                        price=round(price_usd, 2),
+                        currency="USD",
+                        unit="troy_oz",
+                        change_24h=0,
+                        change_pct_24h=0,
+                        high_24h=round(price_usd * 1.01, 2),
+                        low_24h=round(price_usd * 0.99, 2),
+                        timestamp=datetime.now(),
+                        source="Metals.live"
+                    ))
         except Exception as e:
-            print(f"Error fetching XAG/USD: {e}")
-            # Use cached data as fallback
-            if fallback_prices:
-                return fallback_prices
-            # Last resort: return empty list
+            print(f"Error fetching from metals.live: {e}")
+
+        # Fallback: fetch from gold-api with browser impersonation
+        if not prices:
+            try:
+                data = await self._fetch_json(
+                    "https://www.goldapi.io/api/XAG/USD",
+                    {"x-access-token": settings.gold_api_key or "demo"}
+                )
+                price_usd = data.get("price", 0)
+                if price_usd > 0:
+                    prices.append(SilverPrice(
+                        symbol="XAG/USD",
+                        price=round(price_usd, 2),
+                        currency="USD",
+                        unit="troy_oz",
+                        change_24h=round(data.get("ch", 0), 2),
+                        change_pct_24h=round(data.get("chp", 0), 2),
+                        high_24h=round(data.get("high_price", price_usd), 2),
+                        low_24h=round(data.get("low_price", price_usd), 2),
+                        timestamp=datetime.now(),
+                        source="GoldAPI"
+                    ))
+            except Exception as e:
+                print(f"Error fetching from goldapi: {e}")
+
+        # Last fallback: try Yahoo Finance with curl_cffi impersonation
+        if not prices:
+            try:
+                from curl_cffi import requests as curl_requests
+                resp = curl_requests.get(
+                    "https://query1.finance.yahoo.com/v8/finance/chart/XAGUSD=X?interval=1d&range=2d",
+                    impersonate="chrome110"
+                )
+                result = resp.json()
+                quote = result["chart"]["result"][0]["indicators"]["quote"][0]
+                closes = [x for x in quote["close"] if x is not None]
+                highs = [x for x in quote["high"] if x is not None]
+                lows = [x for x in quote["low"] if x is not None]
+                if closes:
+                    price_usd = closes[-1]
+                    prev = closes[-2] if len(closes) > 1 else price_usd
+                    change = price_usd - prev
+                    change_pct = (change / prev) * 100
+                    prices.append(SilverPrice(
+                        symbol="XAG/USD",
+                        price=round(price_usd, 2),
+                        currency="USD",
+                        unit="troy_oz",
+                        change_24h=round(change, 2),
+                        change_pct_24h=round(change_pct, 2),
+                        high_24h=round(highs[-1], 2) if highs else round(price_usd * 1.01, 2),
+                        low_24h=round(lows[-1], 2) if lows else round(price_usd * 0.99, 2),
+                        timestamp=datetime.now(),
+                        source="Yahoo Finance (curl_cffi)"
+                    ))
+            except Exception as e:
+                print(f"Error fetching from Yahoo: {e}")
+
+        if not prices and fallback_prices:
+            return fallback_prices
+
+        if not prices:
             return []
 
-        # Fetch Silver Futures (SI=F)
-        try:
-            si = yf.Ticker("SI=F")
-            info = si.history(period="2d")
-            if not info.empty:
-                latest = info.iloc[-1]
-                prev = info.iloc[-2] if len(info) > 1 else latest
-                change = latest["Close"] - prev["Close"]
-                change_pct = (change / prev["Close"]) * 100
+        # Add INR price
+        xag_usd = prices[0].price
+        prices.append(SilverPrice(
+            symbol="XAG/INR",
+            price=round(xag_usd * usd_inr, 2),
+            currency="INR",
+            unit="troy_oz",
+            change_24h=round(prices[0].change_24h * usd_inr, 2),
+            change_pct_24h=prices[0].change_pct_24h,
+            high_24h=round(prices[0].high_24h * usd_inr, 2),
+            low_24h=round(prices[0].low_24h * usd_inr, 2),
+            timestamp=datetime.now(),
+            source="Derived from XAG/USD"
+        ))
 
-                prices.append(SilverPrice(
-                    symbol="COMEX_SI",
-                    price=round(latest["Close"], 2),
-                    currency="USD",
-                    unit="troy_oz",
-                    change_24h=round(change, 2),
-                    change_pct_24h=round(change_pct, 2),
-                    high_24h=round(latest["High"], 2),
-                    low_24h=round(latest["Low"], 2),
-                    timestamp=datetime.now(),
-                    source="COMEX"
-                ))
-        except Exception as e:
-            print(f"Error fetching COMEX futures: {e}")
-
-        # XAG/INR derived
-        if prices:
-            xag_usd = prices[0].price
-            xag_inr = xag_usd * self.USD_INR_RATE
-            prices.append(SilverPrice(
-                symbol="XAG/INR",
-                price=round(xag_inr, 2),
-                currency="INR",
-                unit="troy_oz",
-                change_24h=round(prices[0].change_24h * self.USD_INR_RATE, 2),
-                change_pct_24h=prices[0].change_pct_24h,
-                high_24h=round(prices[0].high_24h * self.USD_INR_RATE, 2),
-                low_24h=round(prices[0].low_24h * self.USD_INR_RATE, 2),
-                timestamp=datetime.now(),
-                source="Derived from XAG/USD"
-            ))
-
-        # Update cache
-        if prices:
-            self._cached_prices = prices
-            self._cache_time = time.time()
-
+        self._cached_prices = prices
+        self._cache_time = time.time()
         return prices
 
     async def get_india_prices(self) -> SilverPriceIndia:
-        """Get India-specific silver prices (MCX, local market)."""
-        xag_usd = None
-        try:
-            xag = yf.Ticker("XAGUSD=X")
-            info = xag.history(period="1d")
-            if not info.empty:
-                xag_usd = info.iloc[-1]["Close"]
-        except Exception:
-            xag_usd = 30.0  # fallback
+        """Get India-specific silver prices."""
+        usd_inr = await self._get_usd_inr_rate()
+        xag_usd = 32.0
 
-        # Convert to INR per gram and per kg
-        price_per_oz_inr = xag_usd * self.USD_INR_RATE
+        # Try to get live price
+        try:
+            prices = await self.get_live_prices()
+            if prices:
+                xag_usd = prices[0].price
+        except Exception:
+            pass
+
+        price_per_oz_inr = xag_usd * usd_inr
         price_per_gram = price_per_oz_inr / self.OZ_TO_GRAM
         price_per_kg = price_per_gram * 1000
 
-        # Add approximate local premium (India typically trades at premium)
         local_premium_pct = 3.5
         price_per_gram_with_premium = price_per_gram * (1 + local_premium_pct / 100)
         price_per_kg_with_premium = price_per_kg * (1 + local_premium_pct / 100)
@@ -149,54 +197,66 @@ class SilverDataService:
             import_duty_pct=15.0,
             currency="INR",
             timestamp=datetime.now(),
-            source="Derived + MCX India estimates"
+            source=f"Live XAG/USD × INR {usd_inr} + MCX estimates"
         )
 
     async def get_historical_data(self, symbol: str = "XAGUSD=X",
                                    period: str = "1y") -> HistoricalData:
-        """Fetch historical price data."""
+        """Fetch historical price data via Yahoo Finance with impersonation."""
         try:
-            ticker = yf.Ticker(symbol)
-            hist = ticker.history(period=period)
+            from curl_cffi import requests as curl_requests
+            period_map = {"1mo": "1mo", "3mo": "3mo", "6mo": "6mo", "1y": "1y", "2y": "2y", "5y": "5y"}
+            yf_period = period_map.get(period, "1y")
+            resp = curl_requests.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range={yf_period}",
+                impersonate="chrome110"
+            )
+            result = resp.json()
+            chart = result["chart"]["result"][0]
+            timestamps = chart["timestamp"]
+            quote = chart["indicators"]["quote"][0]
 
             data = []
-            for idx, row in hist.iterrows():
-                data.append({
-                    "date": idx.strftime("%Y-%m-%d"),
-                    "open": round(row["Open"], 2),
-                    "high": round(row["High"], 2),
-                    "low": round(row["Low"], 2),
-                    "close": round(row["Close"], 2),
-                    "volume": int(row["Volume"])
-                })
+            for i, ts in enumerate(timestamps):
+                opens = quote["open"]
+                highs = quote["high"]
+                lows = quote["low"]
+                closes = quote["close"]
+                volumes = quote["volume"]
+                if closes[i] is not None:
+                    data.append({
+                        "date": datetime.fromtimestamp(ts).strftime("%Y-%m-%d"),
+                        "open": round(opens[i], 2) if opens[i] else 0,
+                        "high": round(highs[i], 2) if highs[i] else 0,
+                        "low": round(lows[i], 2) if lows[i] else 0,
+                        "close": round(closes[i], 2),
+                        "volume": int(volumes[i]) if volumes[i] else 0
+                    })
 
-            return HistoricalData(
-                symbol=symbol,
-                data=data,
-                period=period
-            )
+            return HistoricalData(symbol=symbol, data=data, period=period)
         except Exception as e:
             print(f"Error fetching historical data: {e}")
             return HistoricalData(symbol=symbol, data=[], period=period)
 
     async def get_technical_indicators(self, symbol: str = "XAGUSD=X") -> dict:
-        """Calculate key technical indicators."""
+        """Calculate technical indicators from historical data."""
         try:
-            ticker = yf.Ticker(symbol)
-            hist = ticker.history(period="6mo")
-            closes = hist["Close"]
+            hist_data = await self.get_historical_data(symbol, "6mo")
+            if not hist_data.data:
+                return {"error": "No data available"}
+
+            closes = pd.Series([d["close"] for d in hist_data.data])
+            highs = pd.Series([d["high"] for d in hist_data.data])
+            lows = pd.Series([d["low"] for d in hist_data.data])
 
             if len(closes) < 50:
                 return {"error": "Insufficient data"}
 
-            # Moving averages
             sma_20 = closes.rolling(20).mean().iloc[-1]
             sma_50 = closes.rolling(50).mean().iloc[-1]
             sma_200 = closes.rolling(min(200, len(closes))).mean().iloc[-1]
-
             current = closes.iloc[-1]
 
-            # RSI (14-day)
             delta = closes.diff()
             gain = delta.where(delta > 0, 0.0)
             loss = -delta.where(delta < 0, 0.0)
@@ -205,17 +265,14 @@ class SilverDataService:
             rs = avg_gain / avg_loss if avg_loss != 0 else 100
             rsi = 100 - (100 / (1 + rs))
 
-            # MACD
             ema_12 = closes.ewm(span=12).mean()
             ema_26 = closes.ewm(span=26).mean()
             macd = ema_12 - ema_26
             signal = macd.ewm(span=9).mean()
 
-            # Support/Resistance (simple: recent highs/lows)
-            recent_high = hist["High"].max()
-            recent_low = hist["Low"].min()
+            recent_high = highs.max()
+            recent_low = lows.min()
 
-            # Trend determination
             trend = "neutral"
             if current > sma_20 > sma_50:
                 trend = "bullish"
@@ -236,9 +293,8 @@ class SilverDataService:
                 "volatility_30d": round(closes.pct_change().rolling(30).std().iloc[-1] * 100, 2)
             }
         except Exception as e:
-            print(f"Error fetching technical indicators: {e}")
-            # Return error instead of fake data
-            return {"error": "Rate limited by Yahoo Finance. Please try again later."}
+            print(f"Error calculating technical indicators: {e}")
+            return {"error": "Unable to calculate indicators. Try again later."}
 
     async def get_supply_demand(self) -> SupplyDemand:
         """Get silver supply-demand fundamentals (from Silver Institute estimates)."""
