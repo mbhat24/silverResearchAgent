@@ -32,6 +32,7 @@ class SilverDataService:
         prices = []
 
         # Check cache first (even if expired, return cached data on error)
+        fallback_prices = None
         if self._cached_prices:
             cache_age = time.time() - self._cache_time if self._cache_time else 999999
             if cache_age < self._cache_duration:
