@@ -155,25 +155,29 @@ class SilverDataService:
     async def get_historical_data(self, symbol: str = "XAGUSD=X",
                                    period: str = "1y") -> HistoricalData:
         """Fetch historical price data."""
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(period=period)
+        try:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period=period)
 
-        data = []
-        for idx, row in hist.iterrows():
-            data.append({
-                "date": idx.strftime("%Y-%m-%d"),
-                "open": round(row["Open"], 2),
-                "high": round(row["High"], 2),
-                "low": round(row["Low"], 2),
-                "close": round(row["Close"], 2),
-                "volume": int(row["Volume"])
-            })
+            data = []
+            for idx, row in hist.iterrows():
+                data.append({
+                    "date": idx.strftime("%Y-%m-%d"),
+                    "open": round(row["Open"], 2),
+                    "high": round(row["High"], 2),
+                    "low": round(row["Low"], 2),
+                    "close": round(row["Close"], 2),
+                    "volume": int(row["Volume"])
+                })
 
-        return HistoricalData(
-            symbol=symbol,
-            data=data,
-            period=period
-        )
+            return HistoricalData(
+                symbol=symbol,
+                data=data,
+                period=period
+            )
+        except Exception as e:
+            print(f"Error fetching historical data: {e}")
+            return HistoricalData(symbol=symbol, data=[], period=period)
 
     async def get_technical_indicators(self, symbol: str = "XAGUSD=X") -> dict:
         """Calculate key technical indicators."""
