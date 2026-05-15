@@ -1,4 +1,4 @@
-import { Factory, TrendingUp, TrendingDown } from "lucide-react";
+import { Factory, TrendingUp, TrendingDown, AlertTriangle } from "lucide-react";
 
 export default function SupplyDemandPanel({ data, expanded = false }) {
   if (!data) {

@@ -13,15 +13,16 @@ settings = get_settings()
 
 # RSS feeds for silver/precious metals news
 SILVER_RSS_FEEDS = [
+    "https://news.google.com/rss/search?q=silver+price+precious+metals&hl=en-US&gl=US&ceid=US:en",
+    "https://www.metalsdaily.com/news/silver-news/feed/",
     "https://www.kitco.com/news/silver/rss",
-    "https://www.bullionvault.com/rss/silver-news.xml",
-    "https://feeds.feedburner.com/silverdoctors",
-    "https://www.investing.com/rss/news_301.rss",  # commodities
+    "https://silverseek.com/rss.xml",
+    "https://goldsilver.com/feed/",
 ]
 
 INDIA_SPECIFIC_FEEDS = [
+    "https://news.google.com/rss/search?q=silver+price+India+MCX&hl=en-IN&gl=IN&ceid=IN:en",
     "https://economictimes.indiatimes.com/markets/commodities/rssfeeds/2141783.cms",
-    "https://www.moneycontrol.com/rss/commodities.xml",
 ]
 
 
@@ -43,16 +44,23 @@ class NewsService:
                 if isinstance(result, list):
                     all_items.extend(result)
 
+        # Filter out non-silver articles (require relevance_score > 0)
+        silver_items = [item for item in all_items if item.relevance_score > 0]
+
+        if not silver_items:
+            return []
+
         # Deduplicate by URL hash
         seen = set()
         unique_items = []
-        for item in all_items:
+        for item in silver_items:
             url_hash = hashlib.md5(item.url.encode()).hexdigest()
             if url_hash not in seen:
                 seen.add(url_hash)
                 unique_items.append(item)
 
-        # Sort by published date, newest first
+        # Sort by relevance (highest first), then by published date (newest first)
+        unique_items.sort(key=lambda x: (-x.relevance_score, x.published_at), reverse=True)
         unique_items.sort(key=lambda x: x.published_at, reverse=True)
         return unique_items[:limit]
 
@@ -92,14 +100,18 @@ class NewsService:
             return []
 
     def _calculate_relevance(self, text: str) -> float:
-        """Score how relevant the text is to silver."""
+        """Score how relevant the text is to silver. Returns 0 for non-silver content."""
         text_lower = text.lower()
-        keywords = ["silver", "xag", "precious metal", "bullion", "white metal",
-                     "mcx", "commodity"]
+        primary_keywords = ["silver", "xag", "precious metal", "bullion", "white metal"]
+        secondary_keywords = ["mcx", "commodity", "gold", "metal", "mine", "mining",
+                              "etf", "futures", "spot price", "troy ounce"]
         score = 0.0
-        for kw in keywords:
+        for kw in primary_keywords:
             if kw in text_lower:
-                score += 0.15
+                score += 0.25
+        for kw in secondary_keywords:
+            if kw in text_lower:
+                score += 0.1
         return min(score, 1.0)
 
     async def search_news(self, query: str) -> list[NewsItem]:

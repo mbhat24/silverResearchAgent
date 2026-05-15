@@ -65,6 +65,11 @@ class SupplyDemand(BaseModel):
     investment_demand: Optional[float] = None
     india_imports: Optional[float] = None  # tonnes
     india_demand: Optional[float] = None
+    total_supply: Optional[float] = None
+    total_demand: Optional[float] = None
+    deficit: Optional[float] = None
+    deficit_pct: Optional[float] = None
+    deficit_analysis: Optional[str] = None
     year: int
     source: str
 

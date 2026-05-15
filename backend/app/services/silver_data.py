@@ -9,39 +9,33 @@ import time
 import json
 import sys
 
+from fastapi import HTTPException
+
 from ..models.schemas import SilverPrice, SilverPriceIndia, HistoricalData, SupplyDemand
 from ..config import get_settings
 
 settings = get_settings()
 
-YF_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Origin": "https://finance.yahoo.com",
-    "Referer": "https://finance.yahoo.com",
-}
+KG_TO_TROY_OZ = 32.1507
 
 
-async def _yf_fetch(symbol: str, period: str = "2d", interval: str = "1d") -> dict:
-    """Fetch data from Yahoo Finance API directly."""
+def _yf_fetch_sync(symbol: str, period: str = "2d", interval: str = "1d") -> dict:
+    """Fetch from Yahoo Finance using curl_cffi browser impersonation."""
+    from curl_cffi import requests as curl_requests
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={period}&includePrePost=false"
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-        resp = await client.get(url, headers=YF_HEADERS)
-        resp.raise_for_status()
-        result = resp.json()
-        return result["chart"]["result"][0]
+    resp = curl_requests.get(url, impersonate="chrome120")
+    resp.raise_for_status()
+    result = resp.json()
+    return result["chart"]["result"][0]
 
 
 class SilverDataService:
     """Fetches silver data from multiple sources worldwide and India-specific."""
 
-    OZ_TO_GRAM = 31.1035
-
     _cached_prices = None
     _cache_time = None
     _cache_duration = 300
-    _usd_inr_rate = 86.5
+    _usd_inr_rate = None
 
     async def _get_usd_inr_rate(self) -> float:
         """Fetch live USD/INR exchange rate."""
@@ -52,12 +46,17 @@ class SilverDataService:
                     headers={"User-Agent": "Mozilla/5.0"}
                 )
                 data = resp.json()
-                rate = data.get("rates", {}).get("INR", 86.5)
-                self._usd_inr_rate = rate
-                return rate
+                rate = data.get("rates", {}).get("INR")
+                if rate:
+                    self._usd_inr_rate = rate
+                    return rate
         except Exception as e:
             print(f"Error fetching USD/INR: {e}", file=sys.stderr)
+        if self._usd_inr_rate:
             return self._usd_inr_rate
+        print("WARNING: No USD/INR rate available, using fallback 86.5", file=sys.stderr)
+        self._usd_inr_rate = 86.5
+        return 86.5
 
     async def get_live_prices(self) -> list[SilverPrice]:
         """Fetch live silver prices via Yahoo Finance with browser impersonation."""
@@ -73,7 +72,7 @@ class SilverDataService:
         usd_inr = await self._get_usd_inr_rate()
 
         try:
-            chart = await _yf_fetch("XAGUSD=X", "2d")
+            chart = await asyncio.to_thread(_yf_fetch_sync, "XAGUSD=X", "2d")
             quote = chart["indicators"]["quote"][0]
             closes = [x for x in quote["close"] if x is not None]
             highs = [x for x in quote["high"] if x is not None]
@@ -125,44 +124,53 @@ class SilverDataService:
         return prices
 
     async def get_india_prices(self) -> SilverPriceIndia:
-        """Get India-specific silver prices."""
+        """Get India-specific silver prices with import duty, GST, and local premium."""
         usd_inr = await self._get_usd_inr_rate()
-        xag_usd = 32.0
 
         try:
             prices = await self.get_live_prices()
-            if prices:
+            if prices and prices[0].price > 0:
                 xag_usd = prices[0].price
-        except Exception:
-            pass
+            else:
+                raise ValueError("No live prices available")
+        except Exception as e:
+            print(f"ERROR: Cannot fetch XAG/USD for India pricing: {e}", file=sys.stderr)
+            raise HTTPException(status_code=502, detail="Unable to fetch live silver prices. Please try again.")
 
-        price_per_oz_inr = xag_usd * usd_inr
-        price_per_gram = price_per_oz_inr / self.OZ_TO_GRAM
-        price_per_kg = price_per_gram * 1000
+        # International price per kg in INR
+        intl_price_per_kg_inr = xag_usd * usd_inr * KG_TO_TROY_OZ
 
+        # India pricing: intl price + 15% import duty + 3% GST + 3.5% local premium
+        import_duty_pct = 15.0
+        gst_pct = 3.0
         local_premium_pct = 3.5
-        price_per_gram_with_premium = price_per_gram * (1 + local_premium_pct / 100)
-        price_per_kg_with_premium = price_per_kg * (1 + local_premium_pct / 100)
+
+        price_with_duty = intl_price_per_kg_inr * (1 + import_duty_pct / 100)
+        price_with_gst = price_with_duty * (1 + gst_pct / 100)
+        final_price_per_kg = price_with_gst * (1 + local_premium_pct / 100)
+        final_price_per_gram = final_price_per_kg / 1000
+
+        mcx_price = final_price_per_kg * 1.005
 
         return SilverPriceIndia(
-            price_per_gram=round(price_per_gram_with_premium, 2),
-            price_per_kg=round(price_per_kg_with_premium, 2),
-            mcx_future_price=round(price_per_kg_with_premium * 1.002, 2),
+            price_per_gram=round(final_price_per_gram, 2),
+            price_per_kg=round(final_price_per_kg, 2),
+            mcx_future_price=round(mcx_price, 2),
             mcx_expiry="Near Month",
             local_premium_pct=local_premium_pct,
-            import_duty_pct=15.0,
+            import_duty_pct=import_duty_pct,
             currency="INR",
             timestamp=datetime.now(),
-            source=f"Live XAG/USD × INR {usd_inr} + MCX estimates"
+            source=f"XAG/USD ${xag_usd} × INR {usd_inr} + {import_duty_pct}% duty + {gst_pct}% GST + {local_premium_pct}% premium"
         )
 
     async def get_historical_data(self, symbol: str = "XAGUSD=X",
                                    period: str = "1y") -> HistoricalData:
         """Fetch historical price data via Yahoo Finance."""
         try:
-            period_map = {"1w": "5d", "1mo": "1mo", "3mo": "3mo", "6mo": "6mo", "1y": "1y", "2y": "2y", "5y": "5y"}
-            yf_period = period_map.get(period, "1y")
-            chart = await _yf_fetch(symbol, yf_period)
+            period_map = {"5d": "5d", "1w": "5d", "1mo": "1mo", "3mo": "3mo", "6mo": "6mo", "1y": "1y", "2y": "2y", "5y": "5y"}
+            yf_period = period_map.get(period, period)
+            chart = await asyncio.to_thread(_yf_fetch_sync, symbol, yf_period)
             timestamps = chart["timestamp"]
             quote = chart["indicators"]["quote"][0]
 
@@ -243,16 +251,45 @@ class SilverDataService:
             return {"error": "Unable to calculate indicators. Try again later."}
 
     async def get_supply_demand(self) -> SupplyDemand:
-        """Get silver supply-demand fundamentals (from Silver Institute estimates)."""
-        # These are approximate annual figures based on Silver Institute data
+        """Get silver supply-demand fundamentals with deficit analysis.
+        Data from Silver Institute World Silver Survey 2025 (2024 actuals)."""
+        # 2024 actuals in tonnes (converted from Moz: 1 Moz = 31.1035 tonnes)
+        mine_production = 25500    # 819.7 Moz
+        recycling = 6000           # 193.9 Moz (12-year high)
+        industrial = 21800         # ~700 Moz (record year: PV, automotive, AI, grid)
+        jewelry = 6500             # 208.7 Moz
+        investment = 6200          # physical investment + ETFs (declined y/y)
+        india_imports = 6000
+        india_demand = 6800
+
+        total_supply = mine_production + recycling
+        total_demand = industrial + jewelry + investment
+        deficit = total_demand - total_supply
+        deficit_pct = round((deficit / total_demand) * 100, 1)
+
+        analysis = (
+            f"Silver market recorded a structural deficit of {deficit:,} tonnes ({deficit_pct}% of demand) in 2024, "
+            f"marking the 4th consecutive year of shortfall. "
+            f"Industrial demand hit a record {industrial:,}t, driven by solar PV manufacturing, "
+            f"AI-related applications, 5G infrastructure, and EV adoption. "
+            f"Mine production rose just 0.9% to {mine_production:,}t, while recycling reached a 12-year high of {recycling:,}t. "
+            f"Physical investment declined y/y but ETF inflows remained supportive. "
+            f"India imported ~{india_imports:,} tonnes, remaining the 2nd largest consumer globally."
+        )
+
         return SupplyDemand(
-            global_mine_production=26000,  # tonnes (~835M oz)
-            global_recycling=5500,
-            industrial_demand=16500,
-            jewelry_demand=6500,
-            investment_demand=8500,
-            india_imports=5500,  # tonnes - India is a major importer
-            india_demand=6200,
+            global_mine_production=mine_production,
+            global_recycling=recycling,
+            industrial_demand=industrial,
+            jewelry_demand=jewelry,
+            investment_demand=investment,
+            india_imports=india_imports,
+            india_demand=india_demand,
+            total_supply=total_supply,
+            total_demand=total_demand,
+            deficit=deficit,
+            deficit_pct=deficit_pct,
+            deficit_analysis=analysis,
             year=2024,
-            source="Silver Institute estimates / compiled data"
+            source="Silver Institute World Silver Survey 2025"
         )
